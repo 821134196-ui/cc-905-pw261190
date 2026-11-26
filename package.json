@@ -1,0 +1,16 @@
+{
+  "name": "pointwise-executor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "本地执行器: 分发、阻塞算子、有界通道背压、取消唤醒、检查点恢复核对与依赖图看板 (Python stdlib)",
+  "scripts": {
+    "start": "python3 -m pointwise",
+    "dev": "python3 -m pointwise",
+    "selftest": "python3 -m pointwise.crash_selftest",
+    "test": "python3 -m unittest discover -s tests -v"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

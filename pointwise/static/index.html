@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pointwise · 本地执行器与背压/恢复看板</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+          <circle cx="4" cy="12" r="2.4" fill="currentColor"/>
+          <circle cx="12" cy="5" r="2.4" fill="currentColor"/>
+          <circle cx="12" cy="19" r="2.4" fill="currentColor"/>
+          <circle cx="20" cy="12" r="2.4" fill="currentColor"/>
+          <path d="M6.2 10.8 9.9 6.1M6.2 13.2l3.7 4.7M14.1 6.1l3.7 4.7M14.1 17.9l3.7-4.7"
+                stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div>
+        <h1>Pointwise 本地执行器</h1>
+        <p class="subtitle">分发 · 阻塞算子 · 有界通道背压 · 取消唤醒 · 检查点恢复核对</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="runBadge" class="badge badge-idle"><span class="dot"></span><span id="runStateText">初始化…</span></span>
+      <button id="themeToggle" class="btn btn-ghost" type="button" title="切换深浅色">🌓 主题</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ============== 控制条 ============== -->
+    <section class="card controls" aria-label="运行控制">
+      <div class="control-fields">
+        <fieldset class="field-group">
+          <legend>可控制的输入索引</legend>
+          <div class="field-row">
+            <label>起 <input id="cfgStart" type="number" min="0" step="1" value="0" /></label>
+            <label>数量 <input id="cfgCount" type="number" min="1" max="100000" step="1" value="36" /></label>
+          </div>
+          <label class="full">显式索引(逗号/空格分隔, 优先于区间)
+            <input id="cfgIndices" type="text" placeholder="例如 100,101,102,105 … 留空使用区间" />
+          </label>
+        </fieldset>
+
+        <fieldset class="field-group sliders">
+          <legend>算子与通道</legend>
+          <label class="slider-field">慢分支阻塞 <span class="val" id="slowVal">420 ms</span>
+            <input id="cfgSlow" type="range" min="0" max="1500" step="10" value="420" />
+          </label>
+          <label class="slider-field">快分支阻塞 <span class="val" id="fastVal">20 ms</span>
+            <input id="cfgFast" type="range" min="0" max="300" step="5" value="20" />
+          </label>
+          <label class="slider-field">发射间隔 <span class="val" id="intervalVal">30 ms</span>
+            <input id="cfgInterval" type="range" min="0" max="500" step="5" value="30" />
+          </label>
+          <div class="field-row">
+            <label>分支通道容量 <input id="cfgCap" type="number" min="1" max="64" value="2" /></label>
+            <label>检查点步长 <input id="cfgEvery" type="number" min="1" max="1000" value="4" /></label>
+            <label>分发策略
+              <select id="cfgRouting">
+                <option value="parity" selected>奇偶分支(稳定复现)</option>
+                <option value="round_robin">轮询</option>
+              </select>
+            </label>
+          </div>
+        </fieldset>
+      </div>
+
+      <div class="action-row">
+        <button id="btnStart" class="btn btn-primary" type="button">▶ 启动新运行</button>
+        <button id="btnCancel" class="btn btn-critical" type="button" disabled>■ 取消(唤醒阻塞 worker)</button>
+        <button id="btnCheckpoint" class="btn" type="button" disabled>💾 立即存检查点</button>
+        <button id="btnRestore" class="btn btn-good" type="button">↩ 从检查点恢复</button>
+        <button id="btnReset" class="btn" type="button">♻ 重置</button>
+        <button id="btnSelftest" class="btn btn-warn" type="button">🧪 硬崩溃(kill)恢复自检</button>
+        <span id="actionError" class="action-error" role="alert"></span>
+      </div>
+    </section>
+
+    <!-- ============== 图 + 右栏 ============== -->
+    <section class="card graph-card">
+      <div class="card-head">
+        <h2>依赖关系与通道水位</h2>
+        <div class="legend" aria-label="图例">
+          <span class="legend-item"><i class="sw sw-channel"></i>有界通道(填充=水位)</span>
+          <span class="legend-item"><i class="sw sw-blocked"></i>发送阻塞 / 停顿通道</span>
+          <span class="legend-item"><i class="sw sw-fast"></i>快分支</span>
+          <span class="legend-item"><i class="sw sw-slow"></i>慢分支</span>
+        </div>
+      </div>
+      <div id="graphWrap" class="graph-wrap">
+        <svg id="dag" viewBox="0 0 1188 400" role="img" aria-label="执行器依赖图"></svg>
+      </div>
+      <p class="graph-hint">通道条右侧数字为 <code>当前积压/容量</code>；右上角红色角标是阻塞在该通道上的发送方数量。红色链路即背压传导与停顿归因路径。</p>
+    </section>
+
+    <aside class="side-col">
+      <section id="bottleneckCard" class="card bottleneck" aria-live="polite">
+        <div class="card-head"><h2>停顿归因</h2><span id="bnSeverity" class="sev sev-none">—</span></div>
+        <div id="bottleneckBody" class="bottleneck-body">
+          <p class="muted">启动后，这里会按依赖关系指出是哪个通道导致停顿，以及背压如何传导到上游。</p>
+        </div>
+      </section>
+
+      <section class="card verify" aria-live="polite">
+        <div class="card-head">
+          <h2>输出核对(按输入索引)</h2>
+          <button id="btnVerify" class="btn btn-small" type="button">立即核对</button>
+        </div>
+        <div id="verifyBody"><p class="muted">尚无输出。</p></div>
+      </section>
+    </aside>
+
+    <!-- ============== 检查点 / 取消 / 自检 ============== -->
+    <section class="card">
+      <div class="card-head"><h2>检查点与恢复</h2></div>
+      <div id="checkpointBody"><p class="muted">尚未生成检查点。</p></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>取消唤醒时延</h2></div>
+      <div id="cancelBody"><p class="muted">取消后在此显示每个阻塞 worker 被唤醒并退出的延迟。</p></div>
+    </section>
+
+    <section class="card selftest-card">
+      <div class="card-head"><h2>真实硬崩溃恢复自检</h2></div>
+      <div id="selftestBody">
+        <p class="muted">启动独立子进程，在第 9 条输出 fsync 后 <code>os._exit(42)</code> 模拟被 kill，再用第二个进程从检查点 + 台账恢复并独立核对。点击上方按钮运行。</p>
+      </div>
+    </section>
+
+    <!-- ============== 索引网格 ============== -->
+    <section class="card index-card">
+      <div class="card-head">
+        <h2>受控索引交付网格</h2>
+        <div class="legend">
+          <span class="legend-item"><i class="chip-demo chip-done"></i>已输出</span>
+          <span class="legend-item"><i class="chip-demo chip-pending"></i>未完成</span>
+          <span class="legend-item"><i class="chip-demo chip-missing"></i>核对缺失</span>
+          <span class="legend-item"><i class="chip-demo chip-dup"></i>重复</span>
+        </div>
+      </div>
+      <div id="indexGrid" class="index-grid"><p class="muted">—</p></div>
+    </section>
+
+    <!-- ============== 输出表 + 事件 ============== -->
+    <section class="card outputs-card">
+      <div class="card-head"><h2>最近输出</h2><span id="outputCount" class="muted"></span></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>输入索引 idx</th><th>分支</th><th>处理算子</th><th>提交时间</th></tr></thead>
+          <tbody id="outputsBody"><tr><td colspan="5" class="muted">暂无</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card events-card">
+      <div class="card-head"><h2>事件日志</h2></div>
+      <div id="eventsLog" class="events-log" aria-live="off"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Python stdlib · threading + Condition 有界通道 · 原子检查点/fsync 台账 · 零前端依赖</span>
+    <span id="apiBase"></span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
